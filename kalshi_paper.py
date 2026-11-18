@@ -22,8 +22,10 @@ HOURS_MIN, HOURS_MAX = 6, 18
 FAILS = {}
 
 
-def fee(p):
-    return 0.07 * p * (1 - p)  # approximate; replace with Kalshi's exact formula
+def fee(p, qty=1, m=1.0):
+    """Kalshi taker fee per contract: roundup(M * 0.07 * C * P * (1 - P)) to the cent, divided by C."""
+    total = np.ceil(m * 0.07 * qty * p * (1 - p) * 100 - 1e-9) / 100
+    return total / qty
 
 
 def get_json(path, params=None, tries=4):
@@ -45,10 +47,11 @@ def load_series():
     cand = [s["ticker"] for s in allser
             if s.get("frequency") in ("daily", "weekly") and not s["ticker"].startswith("KXMVE")]
     meta = {s["ticker"]: s.get("category") for s in allser}
-    return cand, meta
+    mult = {s["ticker"]: float(s.get("fee_multiplier") or 1.0) for s in allser}
+    return cand, meta, mult
 
 
-def scan(cand, meta, logged):
+def scan(cand, meta, mult, logged):
     now = time.time()
     new = []
     for ser in cand:
@@ -82,7 +85,8 @@ def scan(cand, meta, logged):
                         "volume": float(mk.get("volume_fp", 0) or 0),
                         "bid_size": float(mk.get("yes_bid_size_fp", 0) or 0),
                         "ask_size": float(mk.get("yes_ask_size_fp", 0) or 0),
-                        "in_rule": int(in_rule), "filled": got, "fill_price": fp, "result": np.nan})
+                        "in_rule": int(in_rule), "filled": got, "fill_price": fp, "fee_mult": mult.get(ser, 1.0),
+                        "result": np.nan})
         time.sleep(0.1)
     return new
 
@@ -105,9 +109,10 @@ def summarize(pl):
     d["in_rule"] = d["in_rule"].fillna(1)
     d["won"] = (d["result"] == "yes").astype(int)
     d["px"] = d["fill_price"].fillna(d["bid"])
-    d["sell_yes"] = d["px"] - d["won"] - fee(d["px"])
-    d["buy_yes"] = d["won"] - d["ask"] - fee(d["ask"])
     d["qty"] = d["filled"].fillna(QTY)
+    d["fee_mult"] = d["fee_mult"].fillna(1.0) if "fee_mult" in d else 1.0
+    d["sell_yes"] = d["px"] - d["won"] - fee(d["px"], d["qty"].clip(lower=1), d["fee_mult"])
+    d["buy_yes"] = d["won"] - d["ask"] - fee(d["ask"], QTY, d["fee_mult"])
     d["grp"] = pd.cut(d["volume"], [-1, 700, 3500, 1e12], labels=["thin <700", "middle", "busy >3500"])
 
     r_ = d[(d["in_rule"] == 1) & (d["qty"] > 0)]
@@ -125,11 +130,11 @@ def summarize(pl):
 
 
 def main():
-    cand, meta = load_series()
+    cand, meta, mult = load_series()
     print(len(cand), "daily/weekly series")
     old = pd.read_csv(LOG) if os.path.exists(LOG) else pd.DataFrame()
     logged = set(old["ticker"]) if len(old) else set()
-    new = scan(cand, meta, logged)
+    new = scan(cand, meta, mult, logged)
     pl = pd.concat([old, pd.DataFrame(new)], ignore_index=True) if len(old) else pd.DataFrame(new)
     print(len(new), "new markets logged |", int(sum(r["in_rule"] for r in new)), "in the 10-50c rule")
     if len(pl):
