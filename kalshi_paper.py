@@ -92,6 +92,7 @@ def scan(cand, meta, mult, logged):
 
 
 def score(pl):
+    pl["result"] = pl["result"].astype(object)  # an all-empty column is read as numbers; results are text
     pending = pl[pl["result"].isna() & (pd.to_datetime(pl["close_time"], utc=True) < pd.Timestamp.now(tz="UTC"))]
     for i, r in pending.iterrows():
         mk = (get_json(f"/markets/{r.ticker}") or {}).get("market", {}) or {}
@@ -138,6 +139,7 @@ def main():
     pl = pd.concat([old, pd.DataFrame(new)], ignore_index=True) if len(old) else pd.DataFrame(new)
     print(len(new), "new markets logged |", int(sum(r["in_rule"] for r in new)), "in the 10-50c rule")
     if len(pl):
+        pl.to_csv(LOG, index=False)  # save new matches first, so a scoring problem can't lose a scan
         pl = score(pl)
         pl.to_csv(LOG, index=False)
         summarize(pl)
